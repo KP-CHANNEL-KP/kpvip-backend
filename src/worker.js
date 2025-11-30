@@ -1,6 +1,6 @@
-// ========= KP VIP Worker (Panel OK + App Login + 1DV) =========
+// ========= KP VIP Worker (Panel OK + App Login = First Login Start) =========
 
-// user list (users: [{username,password,createdAt,expireAt,device_id?}])
+// user list
 async function listUsers(env) {
   let txt = await env.USERS_KV.get("users");
   return txt ? JSON.parse(txt) : [];
@@ -11,7 +11,7 @@ async function saveUsers(env, list) {
   await env.USERS_KV.put("users", JSON.stringify(list));
 }
 
-// JSON helper
+// use raw response
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
@@ -25,7 +25,9 @@ async function adminOnly(request, env, handler) {
   return handler(request, env);
 }
 
-// ===== create user (Panel) =====
+// ===== create user =====
+// Panel ကနေ create လုပ်တဲ့အခါ သက်တမ်း *မစရသေးဘူး*
+// expireAt = 0 ထားပြီး validDays ထည့်သိမ်းမယ်
 async function handleCreateUser(req, env) {
   let body = await req.formData();
   let username = (body.get("username") || "").trim();
@@ -33,129 +35,115 @@ async function handleCreateUser(req, env) {
   let days = parseInt(body.get("days"));
 
   if (!username || !password || !days)
-    return json({ status:"error", message:"invalid params" }, 400);
+    return json({ status: "error", message: "invalid params" }, 400);
 
   let users = await listUsers(env);
   if (users.find(u => u.username === username))
-    return json({ status:"error", message:"User exists" }, 409);
+    return json({ status: "error", message: "User exists" }, 409);
 
-  const now = Math.floor(Date.now()/1000);
-  const expireAt = now + days*86400;
+  const now = Math.floor(Date.now() / 1000);
 
-  // 1DV အတွက် device_id ကို null အဖြစ်စတင်ထားမယ်
+  // သက်တမ်း မစသေးတဲ့ user record
   users.push({
     username,
     password,
     createdAt: now,
-    expireAt,
-    device_id: null
+    expireAt: 0,      // 0 => မစရသေး
+    validDays: days   // ပထမ login ဝင်သလို ဒီရက်အရေအတွက်နဲ့ စပြေးမယ်
   });
   await saveUsers(env, users);
 
-  return json({ status:"ok", username, expireAt });
+  return json({ status: "ok", username, expireAt: 0 });
 }
 
-// ===== renew / edit (Panel + App) =====
+// ===== renew/edit (Panel မှာ သက်တမ်း ထပ်တိုးတဲ့အချိန်) =====
 async function handleEditUser(req, env) {
   let body = await req.formData();
   let username = (body.get("username") || "").trim();
+  let days = parseInt(body.get("days"));
 
-  if (!username)
-    return json({ status:"error", message:"missing username" }, 400);
+  if (!username || !days)
+    return json({ status: "error", message: "invalid" }, 400);
 
   let users = await listUsers(env);
   let u = users.find(x => x.username === username);
-  if (!u) return json({ status:"error", message:"no user" }, 404);
+  if (!u) return json({ status: "error", message: "no user" }, 404);
 
-  let daysStr = body.get("days");
-  let deviceId = body.get("device_id");
-  let expiredDateStr = body.get("expired_date");
-
-  if (daysStr) {
-    // ---- Panel Renew (days ထပ်တိုး) ----
-    let days = parseInt(daysStr);
-    if (!days) return json({ status:"error", message:"invalid days" }, 400);
-    u.expireAt += days*86400;
-  } else if (deviceId && expiredDateStr) {
-    // ---- App ပြန်ခေါ်တဲ့ reuploadUserInfo (1DV bind) ----
-    u.device_id = String(deviceId);
-
-    // APK က expired_date ကို millis နဲ့ ပို့လာလိမ့်မယ်
-    let ms = parseInt(expiredDateStr);
-    if (ms > 0) {
-      u.expireAt = Math.floor(ms / 1000);
-    }
+  // expireAt မစရသေး (0) ဆိုရင် => ထပ်တိုး days ကို validDays ထဲမှာပဲ ထပ်ထည့်ပေးမယ်
+  if (!u.expireAt || u.expireAt === 0) {
+    const oldValid = u.validDays || 0;
+    u.validDays = oldValid + days;
   } else {
-    return json({ status:"error", message:"invalid params" }, 400);
+    // သက်တမ်း စပြီးသား user ဖြစ်ရင် direct expireAt ကို ထပ်တိုး
+    u.expireAt += days * 86400;
   }
 
   await saveUsers(env, users);
-  return json({ status:"ok" });
+  return json({ status: "ok" });
 }
 
-// ===== delete (Panel + App) =====
+// ===== delete (panel + app) =====
 async function handleDeleteUser(req, env) {
   let body = await req.formData();
   // Panel က username သုံးတယ်, APK က usernameToDelete သုံးတယ်
   let username = (body.get("username") || body.get("usernameToDelete") || "").trim();
-  if (!username) return json({ status:"error", message:"missing username" }, 400);
+  if (!username) return json({ status: "error", message: "missing username" }, 400);
 
   let users = await listUsers(env);
   let before = users.length;
   users = users.filter(u => u.username !== username);
   await saveUsers(env, users);
 
-  return json({ status:"ok", deleted: before - users.length });
+  return json({ status: "ok", deleted: before - users.length });
 }
 
-// ===== login for APP (1DV logic ပါ) =====
+// ===== login for APP =====
+// ဒီမှာပဲ "ပထမ login ဝင်တဲ့အချိန်" မှာ expireAt သတ်မှတ်ပေးမယ်
 async function handleLogin(req, env) {
   let body = await req.formData();
   let username = (body.get("username") || "").trim();
   let password = (body.get("password") || "").trim();
 
+  // APK ထဲမှာ JSONObject.getString("status") သုံးလို့
+  // boolean မပို့တော့ဘဲ string ပဲသုံးမယ်
   if (!username || !password)
-    return json({ status:"fail", message:"missing_params" });
+    return json({ status: "fail", message: "missing_params" });
 
   let users = await listUsers(env);
   let u = users.find(x => x.username === username);
 
   if (!u)
-    return json({ status:"fail", message:"user_not_found" });
+    return json({ status: "fail", message: "user_not_found" });
 
   if (u.password !== password)
-    return json({ status:"fail", message:"wrong_password" });
+    return json({ status: "fail", message: "wrong_password" });
 
-  let now = Math.floor(Date.now()/1000);
-  if (now > u.expireAt)
-    return json({ status:"fail", message:"expired" });
+  const now = Math.floor(Date.now() / 1000);
 
-  // 1DV အတွက် device_id ရှိ / မရှိ အလိုက်
-  const secondsLeft = u.expireAt - now;
+  // 🟢 ပထမဆုံး login (သို့) သက်တမ်း မစရသေးတဲ့ အခြေအနေ
+  if (!u.expireAt || u.expireAt === 0) {
+    // Panel က သတ်ထားတဲ့ validDays မရှိရင် default 30 days
+    const days = u.validDays || 30;
+    u.validDays = days; // ensure exists
 
-  // device_id မရှိသေးရင် - ပထမ login (status:"login" + days)
-  if (!u.device_id) {
-    let daysLeft = Math.ceil(secondsLeft / 86400);
-    if (daysLeft < 1) daysLeft = 1;
-
-    // APK handleLoginResponse() ကိုက်အောင်
-    // status == "login" && expired_date = days
-    return json({
-      status: "login",
-      user: username,
-      expired_date: String(daysLeft)
-    });
+    u.expireAt = now + days * 86400; // အခုက starting point
+    await saveUsers(env, users);
   }
 
-  // device_id ရှိပြီးသားဆိုရင် - Re-login
-  // APK က ဒီ JSON ထဲက device_id ကို ကိုယ်ရဲ့ android_id နဲ့ နှိုင်းစစ်မယ်
-  let expiredMillis = u.expireAt * 1000;
+  // အခုမှ expiry စစ်မယ်
+  if (now > u.expireAt)
+    return json({ status: "fail", message: "expired" });
 
+  let secondsLeft = u.expireAt - now;
+  let daysLeft = Math.ceil(secondsLeft / 86400);
+  if (daysLeft < 1) daysLeft = 1;
+
+  // APK handleLoginResponse() မှာ
+  // status == "login", user, expired_date ကို သုံးထားတယ်
   return json({
-    status: "re_login",
+    status: "login",
     user: username,
-    expired_date: String(expiredMillis),
-    device_id: u.device_id
+    expired_date: String(daysLeft)
   });
 }
 
@@ -165,21 +153,31 @@ async function handleExist(req, env) {
   let username = (body.get("username") || "").trim();
 
   if (!username)
-    return json({ status:"error", message:"missing_username" }, 400);
+    return json({ status: "error", message: "missing_username" }, 400);
 
   let users = await listUsers(env);
   let u = users.find(x => x.username === username);
 
-  let now = Math.floor(Date.now()/1000);
+  const now = Math.floor(Date.now() / 1000);
 
   if (!u) {
-    // APK handleCheckUserResponse() မှာ
-    // status != "success" ဆိုရင် auto delete / premium clear လုပ်တယ်
-    return json({ status:"fail", message:"user_not_found" });
+    // APK handleCheckUserResponse() မှာ status != "success" ဆိုရင်
+    // auto delete + premium clear လုပ်တယ်
+    return json({ status: "fail", message: "user_not_found" });
+  }
+
+  // expireAt မစသေး (0) ဆိုရင် => သက်တမ်း မစသေးပဲ "ရှိရင်း" လို့ သတ်မှတ်မယ်
+  if (!u.expireAt || u.expireAt === 0) {
+    return json({
+      status: "success",
+      user: username,
+      expireAt: 0,
+      message: "not_started"
+    });
   }
 
   if (now > u.expireAt) {
-    return json({ status:"fail", message:"expired" });
+    return json({ status: "fail", message: "expired" });
   }
 
   return json({
@@ -189,10 +187,10 @@ async function handleExist(req, env) {
   });
 }
 
-// ===== list for admin (Panel) =====
+// ===== list for admin =====
 async function handleList(req, env) {
   let users = await listUsers(env);
-  return json({ status:"ok", users });
+  return json({ status: "ok", users });
 }
 
 // ===== Router =====
@@ -201,16 +199,14 @@ export default {
     let url = new URL(req.url);
     let path = url.pathname;
 
-    // Admin / Panel side
     if (path.endsWith("create.php")) return adminOnly(req, env, handleCreateUser);
     if (path.endsWith("edit.php"))   return adminOnly(req, env, handleEditUser);
     if (path.endsWith("delete.php")) return handleDeleteUser(req, env);
     if (path.endsWith("list.php"))   return adminOnly(req, env, handleList);
 
-    // App side
     if (path.endsWith("login.php"))       return handleLogin(req, env);
     if (path.endsWith("user_exist.php"))  return handleExist(req, env);
 
-    return json({ status:"error", message:"Not found", path, method:req.method }, 404);
+    return json({ status: "error", message: "Not found", path, method: req.method }, 404);
   }
 };
