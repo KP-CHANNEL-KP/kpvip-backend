@@ -1,318 +1,408 @@
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    let path = url.pathname;
-
-    // Route ကို vpnadmin.kpwork.qzz.io/kpvip/* လို့ချိတ်ထားလို့
-    // /kpvip prefix ကိုဖြတ်လိုက်မယ်
-    if (path.startsWith('/kpvip')) {
-      path = path.substring('/kpvip'.length) || '/';
-    }
-
-    // CORS preflight
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        status: 204,
-        headers: corsHeaders(),
-      });
-    }
-
     try {
-      if (path === '/create.php' && request.method === 'POST') {
-        return await handleCreateUser(request, env);
+      const url = new URL(request.url);
+      let path = url.pathname;
+
+      // Base path: /kpvip/ (apk + admin panel က /kpvip/... နဲ့ခေါ်နေ)
+      const base = "/kpvip";
+      if (path.startsWith(base)) {
+        path = path.slice(base.length);
       }
-      if (path === '/renew.php' && request.method === 'POST') {
-        return await handleRenewUser(request, env);
+      if (path === "") path = "/";
+
+      // CORS preflight
+      if (request.method === "OPTIONS") {
+        return handleOptions();
       }
-      if (path === '/delete.php' && request.method === 'POST') {
-        return await handleDeleteUser(request, env);
+
+      // -------- Admin-only routes (Admin panel) ----------
+      if (request.method === "POST" && path === "/create.php") {
+        return await adminOnly(request, env, handleCreateUser);
       }
-      if (path === '/list.php' && request.method === 'POST') {
-        return await handleListUsers(request, env);
+
+      if (request.method === "POST" && path === "/edit.php") {
+        return await adminOnly(request, env, handleEditUser);
       }
-      if (path === '/user_exist.php' && request.method === 'POST') {
-        return await handleUserExist(request, env);
+
+      if (request.method === "POST" && path === "/list.php") {
+        return await adminOnly(request, env, handleListUsers);
       }
-      if (path === '/login.php' && request.method === 'POST') {
+
+      // Admin + App ကိုလုံး ဝင်လို့ရမယ့် delete route
+      if (request.method === "POST" && path === "/delete.php") {
+        return await handleDeleteRoute(request, env);
+      }
+
+      // -------- App-only routes (APK) ----------
+      if (request.method === "POST" && path === "/login.php") {
         return await handleLogin(request, env);
       }
-      // APK မှာ reuploadUrl = edit.php ဖြစ်လို့ ဒီမှာ ချိတ်ပေးထားတယ်
-      if (path === '/edit.php' && request.method === 'POST') {
-        return await handleReupload(request, env);
+
+      if (request.method === "POST" && path === "/user_exist.php") {
+        return await handleUserExist(request, env);
       }
 
-      // မကိုက်တဲ့ path တွေအတွက်
       return json(
-        {
-          status: 'error',
-          message: 'Not found',
-          path,
-          method: request.method,
-        },
-        404,
+        { status: "error", message: "Not found", path, method: request.method },
+        404
       );
-    } catch (e) {
+    } catch (err) {
+      // adminOnly မှာ Response ပစ်လိုက်ရင် ဒီထဲကနေ ပြန်ပေးစေချင်လို့
+      if (err instanceof Response) return err;
+
       return json(
         {
-          status: 'error',
-          message: e?.message || 'Server error',
+          status: "error",
+          message: "Internal error",
+          detail: String(err),
         },
-        500,
+        500
       );
     }
   },
 };
 
-/* ---------- Helper Functions ---------- */
+/* ----------------- Helper functions ----------------- */
 
-function corsHeaders() {
+function corsHeaders(extra = {}) {
   return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers":
+      "Content-Type, x-admin-secret, Authorization",
+    ...extra,
   };
 }
 
-function json(body, status = 200) {
-  return new Response(JSON.stringify(body), {
+function json(obj, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(obj), {
     status,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      ...corsHeaders(),
-    },
+    headers: corsHeaders({
+      "Content-Type": "application/json; charset=utf-8",
+      ...extraHeaders,
+    }),
   });
 }
 
-// Admin panel auth (Admin Secret)
-function requireAdmin(request, env) {
-  const secret = env.ADMIN_SECRET;
-  if (!secret) return false;
-
-  const auth = request.headers.get('Authorization') || '';
-
-  if (auth === secret) return true;
-  if (auth === `Bearer ${secret}`) return true;
-
-  return false;
+function handleOptions() {
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders(),
+  });
 }
 
-// KV key
-function userKey(username) {
-  return `user:${username.toLowerCase()}`;
+async function parseForm(request) {
+  const form = await request.formData();
+  const obj = {};
+  for (const [k, v] of form.entries()) {
+    obj[k] = String(v);
+  }
+  return obj;
 }
 
-/* ---------- Handlers ---------- */
+/* ----------------- KV helpers ----------------- */
 
-// POST /create.php (Admin)
+async function getUser(env, username) {
+  if (!username) return null;
+  const raw = await env.USERS_KV.get(username);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function putUser(env, user) {
+  await env.USERS_KV.put(user.username, JSON.stringify(user));
+}
+
+async function deleteUser(env, username) {
+  await env.USERS_KV.delete(username);
+}
+
+/* ----------------- Admin auth ----------------- */
+
+// Admin panel 用 route တွေ (create / edit / list) အတွက်
+async function adminOnly(request, env, handler) {
+  const sent = request.headers.get("x-admin-secret") || "";
+  const expected = env.ADMIN_SECRET || "";
+
+  if (!sent || !expected || sent !== expected) {
+    // Response ကို throw လိုက်မယ် – மேலခု catch ကြောင့် တိုက်ရိုက် client ကို ပြန်ပါတယ်
+    throw json({ status: "error", message: "Unauthorized" }, 401);
+  }
+
+  return handler(request, env);
+}
+
+// delete.php လို app က Authorization header သုံးပြီးခေါ်နိုင်သလို
+// admin panel က x-admin-secret နဲ့လဲ ခေါ်တဲ့အခါ အိုကေ ဖြစ်အောင်
+async function handleDeleteRoute(request, env) {
+  const auth = request.headers.get("Authorization") || "";
+  const adminSecret = request.headers.get("x-admin-secret") || "";
+  const expected = env.ADMIN_SECRET || "";
+
+  const fromApp = auth === "N4VPN-MinKhant";
+  const fromAdmin = adminSecret && adminSecret === expected;
+
+  if (!fromApp && !fromAdmin) {
+    return json({ status: "error", message: "Unauthorized" }, 401);
+  }
+
+  return handleDeleteUser(request, env);
+}
+
+/* ----------------- Admin handlers ----------------- */
+
+// /create.php  (Admin panel သီးသန့်)
 async function handleCreateUser(request, env) {
-  if (!requireAdmin(request, env)) {
-    return json({ status: 'error', message: 'Unauthorized' }, 401);
+  const form = await parseForm(request);
+  const username = (form["username"] || "").trim();
+  const password = (form["password"] || "").trim();
+  const daysStr = (form["days"] || "").trim();
+
+  if (!username || !password || !daysStr) {
+    return json(
+      { status: "error", message: "missing fields" },
+      400
+    );
   }
 
-  const data = await request.json().catch(() => ({}));
-  const username = (data.username || '').trim();
-  const password = (data.password || '').trim();
-  const days = parseInt(data.days || data.expireDays || 0, 10);
-
-  if (!username || !password || !days || days <= 0) {
-    return json({ status: 'error', message: 'Invalid input' }, 400);
+  const days = Number(daysStr);
+  if (!Number.isFinite(days) || days <= 0) {
+    return json(
+      { status: "error", message: "invalid days" },
+      400
+    );
   }
 
-  const nowSec = Math.floor(Date.now() / 1000);
-  const expireAt = nowSec + days * 24 * 60 * 60;
+  const now = Math.floor(Date.now() / 1000);
+  const expireAt = now + days * 24 * 60 * 60;
+
+  const existing = await getUser(env, username);
 
   const user = {
     username,
     password,
-    expireAt,      // seconds
-    createdAt: nowSec,
-    deviceId: null,
+    createdAt: existing?.createdAt || now,
+    expireAt,
+    device_id: existing?.device_id || null,
   };
 
-  await env.USERS_KV.put(userKey(username), JSON.stringify(user));
+  await putUser(env, user);
 
   return json({
-    status: 'ok',
-    message: 'User created',
+    status: "ok",
+    message: "user created",
     username,
     expireAt,
   });
 }
 
-// POST /renew.php (Admin)
-async function handleRenewUser(request, env) {
-  if (!requireAdmin(request, env)) {
-    return json({ status: 'error', message: 'Unauthorized' }, 401);
+// /edit.php  (Admin panel – ရက်ထပ်တိုး)
+async function handleEditUser(request, env) {
+  const form = await parseForm(request);
+  const username = (form["username"] || "").trim();
+  const daysStr = (form["days"] || "").trim();
+
+  if (!username || !daysStr) {
+    return json(
+      { status: "error", message: "missing fields" },
+      400
+    );
   }
 
-  const data = await request.json().catch(() => ({}));
-  const username = (data.username || '').trim();
-  const extraDays = parseInt(data.extraDays || data.days || 0, 10);
-
-  if (!username || !extraDays || extraDays <= 0) {
-    return json({ status: 'error', message: 'Invalid input' }, 400);
+  const user = await getUser(env, username);
+  if (!user) {
+    return json(
+      { status: "error", message: "user_not_found" },
+      404
+    );
   }
 
-  const key = userKey(username);
-  const stored = await env.USERS_KV.get(key);
-  if (!stored) {
-    return json({ status: 'error', message: 'User not found' }, 404);
+  const extraDays = Number(daysStr);
+  if (!Number.isFinite(extraDays) || extraDays <= 0) {
+    return json(
+      { status: "error", message: "invalid days" },
+      400
+    );
   }
 
-  const user = JSON.parse(stored);
-  const nowSec = Math.floor(Date.now() / 1000);
-  const base = user.expireAt && user.expireAt > nowSec ? user.expireAt : nowSec;
+  const now = Math.floor(Date.now() / 1000);
+  const base = Math.max(user.expireAt || 0, now);
   user.expireAt = base + extraDays * 24 * 60 * 60;
 
-  await env.USERS_KV.put(key, JSON.stringify(user));
+  await putUser(env, user);
 
   return json({
-    status: 'ok',
-    message: 'User renewed',
+    status: "ok",
+    message: "updated",
     username,
     expireAt: user.expireAt,
   });
 }
 
-// POST /delete.php (Admin + App)
-async function handleDeleteUser(request, env) {
-  const auth = request.headers.get('Authorization') || '';
-  const APP_KEY = 'N4VPN-MinKhant';
-
-  if (!requireAdmin(request, env) && auth !== APP_KEY) {
-    return json({ status: 'error', message: 'Unauthorized' }, 401);
-  }
-
-  const data = await request.json().catch(() => ({}));
-  const username = (data.usernameToDelete || data.username || '').trim();
-
-  if (!username) {
-    return json({ status: 'error', message: 'Username required' }, 400);
-  }
-
-  await env.USERS_KV.delete(userKey(username));
-
-  return json({
-    status: 'ok',
-    message: 'User deleted',
-    username,
-  });
-}
-
-// POST /list.php (Admin)
+// /list.php (Admin panel – အားလုံးကြည့်)
 async function handleListUsers(request, env) {
-  if (!requireAdmin(request, env)) {
-    return json({ status: 'error', message: 'Unauthorized' }, 401);
-  }
-
-  const list = await env.USERS_KV.list({ prefix: 'user:' });
+  const list = await env.USERS_KV.list();
   const users = [];
-
-  for (const key of list.keys) {
-    const value = await env.USERS_KV.get(key.name);
-    if (!value) continue;
-    try {
-      const u = JSON.parse(value);
-      users.push({
-        username: u.username,
-        expireAt: u.expireAt,
-        createdAt: u.createdAt,
-      });
-    } catch {
-      // ignore broken record
-    }
+  for (const item of list.keys) {
+    const u = await getUser(env, item.name);
+    if (!u) continue;
+    users.push({
+      username: u.username,
+      createdAt: u.createdAt || null,
+      expireAt: u.expireAt || null,
+    });
   }
-
-  return json({ status: 'ok', users });
+  return json({ status: "ok", users });
 }
 
-// POST /user_exist.php (App)
-async function handleUserExist(request, env) {
-  const data = await request.json().catch(() => ({}));
-  const username = (data.username || '').trim();
+// /delete.php (Admin panel or App)
+async function handleDeleteUser(request, env) {
+  const form = await parseForm(request);
+  const username =
+    (form["usernameToDelete"] || form["username"] || "").trim();
+
   if (!username) {
-    return json({ status: 'error', message: 'no_username' }, 400);
+    return json(
+      { status: "error", message: "missing username" },
+      400
+    );
   }
 
-  const stored = await env.USERS_KV.get(userKey(username));
-  if (stored) {
-    return json({ status: 'success' });
-  } else {
-    return json({ status: 'error', message: 'user_not_found' });
-  }
+  await deleteUser(env, username);
+  return json({ status: "ok", message: "deleted", username });
 }
 
-// POST /login.php (App)
+/* ----------------- App handlers ----------------- */
+
+// APK: /login.php
 async function handleLogin(request, env) {
-  const data = await request.json().catch(() => ({}));
-  const username = (data.username || '').trim();
-  const password = (data.password || '').trim();
+  const form = await parseForm(request);
+  const username = (form["username"] || "").trim();
+  const password = (form["password"] || "").trim();
 
   if (!username || !password) {
-    return json({ status: 'error', message: 'missing_credentials' }, 400);
+    return json(
+      { status: "missing", message: "missing username or password" },
+      400
+    );
   }
 
-  const stored = await env.USERS_KV.get(userKey(username));
-  if (!stored) {
-    return json({ status: 'error', message: 'user_not_found' });
+  const user = await getUser(env, username);
+  if (!user) {
+    // APK မှာ "Login failed: user_not_found" ဆိုပြီး ပြမယ်
+    return json({ status: "user_not_found" }, 404);
   }
-
-  const user = JSON.parse(stored);
-  const nowSec = Math.floor(Date.now() / 1000);
 
   if (user.password !== password) {
-    return json({ status: 'error', message: 'invalid_password' });
+    return json({ status: "wrong_password" }, 403);
   }
 
-  if (!user.expireAt || user.expireAt < nowSec) {
-    return json({ status: 'error', message: 'expired' });
-  }
+  const now = Math.floor(Date.now() / 1000);
 
-  // deviceId မရှိသေး → first login
-  if (!user.deviceId) {
-    const secondsLeft = user.expireAt - nowSec;
-    const daysLeft = Math.max(1, Math.ceil(secondsLeft / (24 * 60 * 60)));
+  if (!user.device_id) {
+    // ပထမ Login: server မှာ device မသတ်ရသေးသလို
+    if (!user.expireAt || user.expireAt <= now) {
+      return json({ status: "expired" }, 403);
+    }
+
+    const secondsLeft = user.expireAt - now;
+    let daysLeft = Math.floor(secondsLeft / (24 * 60 * 60));
+    if (daysLeft < 1) daysLeft = 1;
+
+    // APK က ဒီ daysLeft ကို သုံးပြီး နောက်ထပ် expired_date timestamp
+    // တွက်လိုက်မယ် (reuploadUserInfo)
+    return json({
+      status: "login",
+      user: user.username,
+      expired_date: String(daysLeft),
+    });
+  } else {
+    // အရင်က device_id already ရှိနေပြီ => re_login
+    if (!user.expireAt || user.expireAt <= now) {
+      return json({ status: "expired" }, 403);
+    }
+
+    const expiredMillis = user.expireAt * 1000;
 
     return json({
-      status: 'login',
+      status: "re_login",
       user: user.username,
-      expired_date: String(daysLeft), // app က days လိုလားတယ်
+      expired_date: String(expiredMillis),
+      device_id: user.device_id,
+    });
+  }
+}
+
+// APK: /user_exist.php  (Account က still သက်တမ်းမကျသေး?)
+async function handleUserExist(request, env) {
+  const form = await parseForm(request);
+  const username = (form["username"] || "").trim();
+
+  const user = await getUser(env, username);
+  if (!user) {
+    return json({
+      status: "error",
+      message: "user_not_found",
     });
   }
 
-  // deviceId ရှိပြီးသား → re_login
-  const expireMillis = user.expireAt * 1000;
+  const now = Math.floor(Date.now() / 1000);
+  const active = !!user.expireAt && user.expireAt > now;
 
   return json({
-    status: 're_login',
-    user: user.username,
-    expired_date: String(expireMillis), // millis
-    device_id: user.deviceId,
+    status: "ok",
+    active,
+    username: user.username,
+    expireAt: user.expireAt || null,
+    createdAt: user.createdAt || null,
   });
 }
 
-// POST /edit.php (App reuploadUserInfo)
+// APK: /edit.php (reuploadUserInfo – device + expired_date(ms) ပြန်ပို့တာ)
 async function handleReupload(request, env) {
-  const data = await request.json().catch(() => ({}));
-  const username = (data.username || '').trim();
-  const deviceId = (data.device_id || '').trim();
-  const expiredDateStr = (data.expired_date || '').trim();
+  const form = await parseForm(request);
+  const username = (form["username"] || "").trim();
+  const device_id = (form["device_id"] || "").trim();
+  const expMsStr = (form["expired_date"] || "").trim();
 
-  if (!username || !deviceId || !expiredDateStr) {
-    return json({ status: 'error', message: 'Invalid input' }, 400);
+  if (!username || !device_id || !expMsStr) {
+    return json(
+      { status: "error", message: "missing fields" },
+      400
+    );
   }
 
-  const stored = await env.USERS_KV.get(userKey(username));
-  if (!stored) {
-    return json({ status: 'error', message: 'user_not_found' }, 404);
+  const user = await getUser(env, username);
+  if (!user) {
+    return json(
+      { status: "error", message: "user_not_found" },
+      404
+    );
   }
 
-  const user = JSON.parse(stored);
-  const expireMillis = parseInt(expiredDateStr, 10) || Date.now();
-  user.deviceId = deviceId;
-  user.expireAt = Math.floor(expireMillis / 1000);
+  const expMs = Number(expMsStr);
+  if (!Number.isFinite(expMs) || expMs <= 0) {
+    return json(
+      { status: "error", message: "invalid_expired_date" },
+      400
+    );
+  }
 
-  await env.USERS_KV.put(userKey(username), JSON.stringify(user));
+  user.device_id = device_id;
+  user.expireAt = Math.floor(expMs / 1000);
 
-  return json({ status: 'ok', message: 'updated' });
+  await putUser(env, user);
+
+  return json({
+    status: "ok",
+    message: "updated",
+    username,
+    expireAt: user.expireAt,
+    device_id,
+  });
 }
