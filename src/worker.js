@@ -4,7 +4,7 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
-    // JSON response helper
+    // ---------- helpers ----------
     function json(data, status = 200) {
       return new Response(JSON.stringify(data), {
         status,
@@ -12,37 +12,41 @@ export default {
       });
     }
 
-    // body parse helper (JSON + form-urlencoded)
     async function getBody(req) {
       const ct = req.headers.get("content-type") || "";
       try {
+        // JSON body
         if (ct.includes("application/json")) {
           return await req.json();
         }
+        // form-urlencoded (app ကသုံးနေတာ ဒီအမျိုးအစား)
         if (ct.includes("application/x-www-form-urlencoded")) {
           const form = await req.formData();
           const obj = {};
           for (const [k, v] of form.entries()) obj[k] = v;
           return obj;
         }
-      } catch (e) {}
+      } catch (e) {
+        // ignore
+      }
       return {};
     }
 
     const nowSec = () => Math.floor(Date.now() / 1000);
-
     const ADMIN_SECRET = env.ADMIN_SECRET || "change_me";
 
-    // =========================
-    // 1) VPN LOGIN
-    //    POST /kpvip/signin.php   (အခု APK က သုံးနေတယ်)
-    //    POST /kpvip/login.php    (ဟောင်း version ပါမယ်)
-    // =========================
+    // ======================================================
+    // 1) VPN LOGIN  (APK ကသုံးမယ့်ပိုင်း)
+    //    POST /kpvip/signin.php
+    //    POST /kpvip/login.php   (ဟောင်း version အတွက် support ထားမယ်)
+    // ======================================================
     if (
       (path === "/kpvip/signin.php" || path === "/kpvip/login.php") &&
       method === "POST"
     ) {
       const body = await getBody(request);
+
+      // APK က ပို့မယ့် field name ကို username/password လို့ ယူထား
       const username = body.username || body.user || "";
       const password = body.password || body.pass || "";
 
@@ -57,15 +61,15 @@ export default {
       const user = await env.USERS_KV.get(key, "json");
 
       if (!user) {
-        // KV ထဲမှာ key မရှိ = မဖွင့်ရသေး / TTL လွန် / ဖျက်ထားပြီ
+        // KV ထဲမှာ parameter မရှိ = မဖွင့်ရသေး / expired / delete သွားပြီ
         return json(
           { status: "error", message: "User not found or expired" },
           404
         );
       }
 
-      // demo only – password ကို plain text နဲ့တူမလား စစ်
-      // အမှန် production မှာ hash သုံးသင့်
+      // demo only – plain text password စစ်
+      // အမှန် production မှာ hash သုံးရမယ်
       if (user.password !== password) {
         return json(
           { status: "error", message: "Wrong username or password" },
@@ -81,7 +85,7 @@ export default {
         );
       }
 
-      // Login OK
+      // Login OK – APK ကို vpnConfig အပါအဝင် ပြန်ပို့
       return json({
         status: "ok",
         username,
@@ -91,14 +95,15 @@ export default {
       });
     }
 
-    // =========================
-    // Admin only routes
-    // =========================
+    // ======================================================
+    // 2) ADMIN ONLY ROUTES
+    //    Admin Panel က အသုံးပြုမယ့် API တွေ
+    // ======================================================
     const adminHeader = request.headers.get("x-admin-secret");
     const isAdmin = adminHeader && adminHeader === ADMIN_SECRET;
 
-    // 2) user_exist.php – user ရှိ/မရှိ check
-    // POST /kpvip/user_exist.php
+    // 2.1) /kpvip/user_exist.php
+    //      POST – user ရှိ/မရှိ စစ်
     if (path === "/kpvip/user_exist.php" && method === "POST") {
       if (!isAdmin) {
         return json({ status: "error", message: "Unauthorized" }, 401);
@@ -128,8 +133,8 @@ export default {
       });
     }
 
-    // 3) edit.php – expire date / plan / vpnConfig ပြင် (renew)
-    // POST /kpvip/edit.php
+    // 2.2) /kpvip/edit.php
+    //      POST – expire date / plan / vpnConfig ပြင် (renew)
     if (path === "/kpvip/edit.php" && method === "POST") {
       if (!isAdmin) {
         return json({ status: "error", message: "Unauthorized" }, 401);
@@ -175,8 +180,8 @@ export default {
       });
     }
 
-    // 4) delete.php – user ဖျက်
-    // POST /kpvip/delete.php
+    // 2.3) /kpvip/delete.php
+    //      POST – user ဖျက်
     if (path === "/kpvip/delete.php" && method === "POST") {
       if (!isAdmin) {
         return json({ status: "error", message: "Unauthorized" }, 401);
@@ -198,8 +203,8 @@ export default {
       });
     }
 
-    // 5) create.php – user အသစ် ဖန်တီး
-    // POST /kpvip/create.php
+    // 2.4) /kpvip/create.php
+    //      POST – user အသစ်ဖန်တီး
     if (path === "/kpvip/create.php" && method === "POST") {
       if (!isAdmin) {
         return json({ status: "error", message: "Unauthorized" }, 401);
@@ -243,7 +248,10 @@ export default {
       });
     }
 
-    // default
-    return new Response("Not found", { status: 404 });
+    // အဆုံး – ဘာပတ်မတက်ရင် 404
+    return json(
+      { status: "error", message: "Not found", path, method },
+      404
+    );
   }
 };
