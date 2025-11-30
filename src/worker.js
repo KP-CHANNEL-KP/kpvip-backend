@@ -1,8 +1,8 @@
-// ========= KP VIP Worker (Panel OK + App Login OK + Admin Secret) =========
+// ========= KP VIP Worker (Admin Secret + 1DV) =========
 
 // user list
 async function listUsers(env) {
-  let txt = await env.USERS_KV.get("users");
+  const txt = await env.USERS_KV.get("users");
   return txt ? JSON.parse(txt) : [];
 }
 
@@ -11,7 +11,7 @@ async function saveUsers(env, list) {
   await env.USERS_KV.put("users", JSON.stringify(list));
 }
 
-// use raw response
+// JSON helper
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
@@ -19,113 +19,148 @@ function json(obj, status = 200) {
   });
 }
 
-// ===== adminOnly (Admin Secret check) =====
+// ===== Admin auth =====
 async function adminOnly(request, env, handler) {
-  const sent = (request.headers.get("x-admin-secret") || "").trim();
-  const real = (env.ADMIN_SECRET || "").trim();
+  const ADMIN_SECRET = env.ADMIN_SECRET || "";
+  const header = request.headers.get("x-admin-secret") || "";
 
-  if (!real) {
-    // Worker env ထဲမှာ ADMIN_SECRET မသတ်ထားရင်
-    return json(
-      { status: "error", message: "ADMIN_SECRET not set in Worker env" },
-      500
-    );
-  }
-
-  if (!sent || sent !== real) {
+  if (!ADMIN_SECRET || header !== ADMIN_SECRET) {
     return json({ status: "error", message: "Unauthorized" }, 401);
   }
 
   return handler(request, env);
 }
 
-// ===== create user (Admin panel) =====
+// ===== create user (1DV) =====
+// Panel က days ကို initialDays အနေနဲ့သိမ်းပြီး
+// expireAt = null, firstLoginAt = null ထားမယ်
 async function handleCreateUser(req, env) {
-  let body = await req.formData();
-  let username = (body.get("username") || "").trim();
-  let password = (body.get("password") || "").trim();
-  let days = parseInt(body.get("days"));
+  const body = await req.formData();
+  const username = (body.get("username") || "").trim();
+  const password = (body.get("password") || "").trim();
+  const days = parseInt(body.get("days"));
 
-  if (!username || !password || !days)
+  if (!username || !password || !days) {
     return json({ status: "error", message: "invalid params" }, 400);
+  }
 
-  let users = await listUsers(env);
-  if (users.find(u => u.username === username))
+  const users = await listUsers(env);
+  if (users.find(u => u.username === username)) {
     return json({ status: "error", message: "User exists" }, 409);
+  }
 
   const now = Math.floor(Date.now() / 1000);
-  const expireAt = now + days * 86400;
+  const initialDays = days;
 
-  // owner optional (admin)
-  users.push({ username, password, createdAt: now, expireAt, owner: "admin" });
+  const user = {
+    username,
+    password,
+    createdAt: now,
+    initialDays,     // 1DV days
+    firstLoginAt: null,
+    expireAt: null   // login မဝင်သေးလို့ null
+  };
+
+  users.push(user);
   await saveUsers(env, users);
 
-  return json({ status: "ok", username, expireAt });
+  return json({
+    status: "ok",
+    username,
+    // panel မှာ သုံးမထားလို့ expireAt ကို null ပဲ ပြန်ပို့
+    expireAt: user.expireAt
+  });
 }
 
 // ===== renew/edit =====
+// User က login မဝင်သေး (expireAt = null) ဆိုရင် initialDays ကိုပဲ +days
+// login ဝင်ပြီးသားဆိုရင် expireAt ကို +days
 async function handleEditUser(req, env) {
-  let body = await req.formData();
-  let username = (body.get("username") || "").trim();
-  let days = parseInt(body.get("days"));
+  const body = await req.formData();
+  const username = (body.get("username") || "").trim();
+  const days = parseInt(body.get("days"));
 
-  if (!username || !days)
+  if (!username || !days) {
     return json({ status: "error", message: "invalid" }, 400);
+  }
 
-  let users = await listUsers(env);
-  let u = users.find(x => x.username === username);
-  if (!u) return json({ status: "error", message: "no user" }, 404);
+  const users = await listUsers(env);
+  const u = users.find(x => x.username === username);
+  if (!u) {
+    return json({ status: "error", message: "no user" }, 404);
+  }
 
-  u.expireAt += days * 86400;
+  const extraSeconds = days * 86400;
+
+  if (!u.expireAt) {
+    // first login မဝင်သေး -> days ကို စုထား
+    u.initialDays = (u.initialDays || 0) + days;
+  } else {
+    // expire date ရှိပြီးသား -> expireAt ကို တိုက်ရိုက် +days
+    u.expireAt += extraSeconds;
+  }
+
   await saveUsers(env, users);
   return json({ status: "ok" });
 }
 
-// ===== delete (panel + app) =====
+// ===== delete =====
 async function handleDeleteUser(req, env) {
-  let body = await req.formData();
-  // Panel က username သုံးတယ်, APK က usernameToDelete သုံးတယ်
-  let username = (body.get("username") || body.get("usernameToDelete") || "").trim();
-  if (!username) return json({ status: "error", message: "missing username" }, 400);
+  const body = await req.formData();
+  const username = (body.get("username") || body.get("usernameToDelete") || "").trim();
+
+  if (!username) {
+    return json({ status: "error", message: "missing username" }, 400);
+  }
 
   let users = await listUsers(env);
-  let before = users.length;
+  const before = users.length;
   users = users.filter(u => u.username !== username);
   await saveUsers(env, users);
 
   return json({ status: "ok", deleted: before - users.length });
 }
 
-// ===== login for APP =====
+// ===== login for APP (1DV start here) =====
 async function handleLogin(req, env) {
-  let body = await req.formData();
-  let username = (body.get("username") || "").trim();
-  let password = (body.get("password") || "").trim();
+  const body = await req.formData();
+  const username = (body.get("username") || "").trim();
+  const password = (body.get("password") || "").trim();
 
-  // APK ထဲမှာ JSONObject.getString("status") သုံးလို့
-  // boolean မပို့တော့ဘဲ string ပဲသုံးမယ်
-  if (!username || !password)
+  if (!username || !password) {
     return json({ status: "fail", message: "missing_params" });
+  }
 
-  let users = await listUsers(env);
-  let u = users.find(x => x.username === username);
+  const users = await listUsers(env);
+  const u = users.find(x => x.username === username);
 
-  if (!u)
+  if (!u) {
     return json({ status: "fail", message: "user_not_found" });
+  }
 
-  if (u.password !== password)
+  if (u.password !== password) {
     return json({ status: "fail", message: "wrong_password" });
+  }
 
-  let now = Math.floor(Date.now() / 1000);
-  if (now > u.expireAt)
+  const now = Math.floor(Date.now() / 1000);
+
+  // 1DV logic: firstLoginAt မရှိသေးရင် ဒီနေရာမှာ စမှတ်
+  if (!u.firstLoginAt) {
+    u.firstLoginAt = now;
+    const days = u.initialDays || 0;
+    u.expireAt = now + days * 86400;
+    await saveUsers(env, users);
+  }
+
+  if (!u.expireAt || now > u.expireAt) {
     return json({ status: "fail", message: "expired" });
+  }
 
-  // APK handleLoginResponse() မှာ
-  // status == "login", user, expired_date ကို သုံးထားတယ်
-  let secondsLeft = u.expireAt - now;
+  const secondsLeft = u.expireAt - now;
   let daysLeft = Math.ceil(secondsLeft / 86400);
   if (daysLeft < 1) daysLeft = 1;
 
+  // APK ထဲမှာ status == "login", user, expired_date အသုံးပြုထားလို့ ဒီ format ကိုထိန်းပေး
   return json({
     status: "login",
     user: username,
@@ -135,21 +170,31 @@ async function handleLogin(req, env) {
 
 // ===== exist for APP =====
 async function handleExist(req, env) {
-  let body = await req.formData();
-  let username = (body.get("username") || "").trim();
+  const body = await req.formData();
+  const username = (body.get("username") || "").trim();
 
-  if (!username)
+  if (!username) {
     return json({ status: "error", message: "missing_username" }, 400);
+  }
 
-  let users = await listUsers(env);
-  let u = users.find(x => x.username === username);
-
-  let now = Math.floor(Date.now() / 1000);
+  const users = await listUsers(env);
+  const u = users.find(x => x.username === username);
 
   if (!u) {
-    // APK handleCheckUserResponse() မှာ status != "success" ဆိုရင်
-    // auto delete + premium clear လုပ်တယ်
     return json({ status: "fail", message: "user_not_found" });
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+
+  // first login မဝင်ရသေး (expireAt = null) ဆိုရင်
+  // user_exist.php မှာတော့ "active" လိုသုံးချင်လား/ မသုံးချင်လား မင်းစိတ်ကြိုက် ပြင်လို့ရတယ်
+  if (!u.expireAt) {
+    return json({
+      status: "success",
+      user: username,
+      expireAt: null,
+      firstLoginAt: null
+    });
   }
 
   if (now > u.expireAt) {
@@ -163,27 +208,23 @@ async function handleExist(req, env) {
   });
 }
 
-// ===== list for admin (Panel) =====
+// ===== list for admin =====
 async function handleList(req, env) {
-  let users = await listUsers(env);
+  const users = await listUsers(env);
   return json({ status: "ok", users });
 }
 
 // ===== Router =====
 export default {
   async fetch(req, env) {
-    let url = new URL(req.url);
-    let path = url.pathname;
+    const url = new URL(req.url);
+    const path = url.pathname;
 
-    // Admin panel endpoints (protected)
-    if (path.endsWith("create.php")) return adminOnly(req, env, handleCreateUser);
-    if (path.endsWith("edit.php"))   return adminOnly(req, env, handleEditUser);
-    if (path.endsWith("list.php"))   return adminOnly(req, env, handleList);
+    if (path.endsWith("create.php"))  return adminOnly(req, env, handleCreateUser);
+    if (path.endsWith("edit.php"))    return adminOnly(req, env, handleEditUser);
+    if (path.endsWith("delete.php"))  return adminOnly(req, env, handleDeleteUser);
+    if (path.endsWith("list.php"))    return adminOnly(req, env, handleList);
 
-    // delete.php ကိုတော့ app ကလည်း သုံးလို့ auth မချိတ်ထားသေး
-    if (path.endsWith("delete.php")) return handleDeleteUser(req, env);
-
-    // App endpoints (no admin secret)
     if (path.endsWith("login.php"))       return handleLogin(req, env);
     if (path.endsWith("user_exist.php"))  return handleExist(req, env);
 
