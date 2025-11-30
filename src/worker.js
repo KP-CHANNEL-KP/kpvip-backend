@@ -15,38 +15,48 @@ export default {
     async function getBody(req) {
       const ct = req.headers.get("content-type") || "";
       try {
-        // JSON body
         if (ct.includes("application/json")) {
           return await req.json();
         }
-        // form-urlencoded (app ကသုံးနေတာ ဒီအမျိုးအစား)
         if (ct.includes("application/x-www-form-urlencoded")) {
           const form = await req.formData();
           const obj = {};
           for (const [k, v] of form.entries()) obj[k] = v;
           return obj;
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
       return {};
     }
 
     const nowSec = () => Math.floor(Date.now() / 1000);
     const ADMIN_SECRET = env.ADMIN_SECRET || "change_me";
 
-    // ======================================================
-    // 1) VPN LOGIN  (APK ကသုံးမယ့်ပိုင်း)
+    // ========== Root "/" ကို စာသေးသေးနဲ့ ပြ ----------
+    if (path === "/" && method === "GET") {
+      return new Response(
+        `<!doctype html>
+<html><head><meta charset="utf-8"><title>KP VIP API</title></head>
+<body>
+  <h1>KP VIP API Online</h1>
+  <p>API Base: <code>/kpvip/*.php</code></p>
+</body></html>`,
+        {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" }
+        }
+      );
+    }
+
+    // =========================
+    // 1) VPN LOGIN  (APK)
     //    POST /kpvip/signin.php
-    //    POST /kpvip/login.php   (ဟောင်း version အတွက် support ထားမယ်)
-    // ======================================================
+    //    POST /kpvip/login.php
+    // =========================
     if (
       (path === "/kpvip/signin.php" || path === "/kpvip/login.php") &&
       method === "POST"
     ) {
       const body = await getBody(request);
-
-      // APK က ပို့မယ့် field name ကို username/password လို့ ယူထား
       const username = body.username || body.user || "";
       const password = body.password || body.pass || "";
 
@@ -61,15 +71,12 @@ export default {
       const user = await env.USERS_KV.get(key, "json");
 
       if (!user) {
-        // KV ထဲမှာ parameter မရှိ = မဖွင့်ရသေး / expired / delete သွားပြီ
         return json(
           { status: "error", message: "User not found or expired" },
           404
         );
       }
 
-      // demo only – plain text password စစ်
-      // အမှန် production မှာ hash သုံးရမယ်
       if (user.password !== password) {
         return json(
           { status: "error", message: "Wrong username or password" },
@@ -85,29 +92,28 @@ export default {
         );
       }
 
-      // Login OK – APK ကို vpnConfig အပါအဝင် ပြန်ပို့
+      // Login OK – vpnConfig မလိုတော့လို့ မပို့တော့
       return json({
         status: "ok",
         username,
-        plan: user.plan,
-        expireAt: user.expireAt,
-        vpnConfig: user.vpnConfig || ""
+        expireAt: user.expireAt
       });
     }
 
-    // ======================================================
+    // =========================
     // 2) ADMIN ONLY ROUTES
-    //    Admin Panel က အသုံးပြုမယ့် API တွေ
-    // ======================================================
+    // =========================
     const adminHeader = request.headers.get("x-admin-secret");
     const isAdmin = adminHeader && adminHeader === ADMIN_SECRET;
 
-    // 2.1) /kpvip/user_exist.php
-    //      POST – user ရှိ/မရှိ စစ်
+    // auth မရရင် common error
+    function needAdmin() {
+      return json({ status: "error", message: "Unauthorized" }, 401);
+    }
+
+    // 2.1) user_exist.php – user ရှိ/မရှိ / expire စစ်
     if (path === "/kpvip/user_exist.php" && method === "POST") {
-      if (!isAdmin) {
-        return json({ status: "error", message: "Unauthorized" }, 401);
-      }
+      if (!isAdmin) return needAdmin();
 
       const body = await getBody(request);
       const username = body.username || body.user || "";
@@ -129,22 +135,18 @@ export default {
         status: "ok",
         exists: true,
         active,
-        expireAt: user.expireAt || null
+        expireAt: user.expireAt || null,
+        createdAt: user.createdAt || null
       });
     }
 
-    // 2.2) /kpvip/edit.php
-    //      POST – expire date / plan / vpnConfig ပြင် (renew)
+    // 2.2) edit.php – days ထပ်တိုး (renew)
     if (path === "/kpvip/edit.php" && method === "POST") {
-      if (!isAdmin) {
-        return json({ status: "error", message: "Unauthorized" }, 401);
-      }
+      if (!isAdmin) return needAdmin();
 
       const body = await getBody(request);
       const username = body.username || body.user || "";
       const days = parseInt(body.days || body.extraDays || "0", 10);
-      const plan = body.plan;
-      const vpnConfig = body.vpnConfig;
 
       if (!username || !days) {
         return json(
@@ -165,8 +167,6 @@ export default {
       const newExpire = baseExpire + days * 24 * 60 * 60;
 
       user.expireAt = newExpire;
-      if (plan) user.plan = plan;
-      if (vpnConfig) user.vpnConfig = vpnConfig;
 
       await env.USERS_KV.put(key, JSON.stringify(user), {
         expirationTtl: newExpire - now
@@ -174,18 +174,15 @@ export default {
 
       return json({
         status: "ok",
-        message: "User updated",
+        message: "User renewed",
         username,
         expireAt: newExpire
       });
     }
 
-    // 2.3) /kpvip/delete.php
-    //      POST – user ဖျက်
+    // 2.3) delete.php – user ဖျက်
     if (path === "/kpvip/delete.php" && method === "POST") {
-      if (!isAdmin) {
-        return json({ status: "error", message: "Unauthorized" }, 401);
-      }
+      if (!isAdmin) return needAdmin();
 
       const body = await getBody(request);
       const username = body.username || body.user || "";
@@ -203,19 +200,14 @@ export default {
       });
     }
 
-    // 2.4) /kpvip/create.php
-    //      POST – user အသစ်ဖန်တီး
+    // 2.4) create.php – user အသစ်ဖန်တီး (username / pw / days)
     if (path === "/kpvip/create.php" && method === "POST") {
-      if (!isAdmin) {
-        return json({ status: "error", message: "Unauthorized" }, 401);
-      }
+      if (!isAdmin) return needAdmin();
 
       const body = await getBody(request);
       const username = body.username || "";
       const password = body.password || "";
       const days = parseInt(body.days || "0", 10);
-      const plan = body.plan || "VIP";
-      const vpnConfig = body.vpnConfig || "";
 
       if (!username || !password || !days) {
         return json(
@@ -229,9 +221,7 @@ export default {
       const expireAt = now + days * 24 * 60 * 60;
 
       const data = {
-        password, // demo only – အမှန်ဆို hash သုံးသင့်
-        plan,
-        vpnConfig,
+        password,
         createdAt: now,
         expireAt
       };
@@ -248,7 +238,39 @@ export default {
       });
     }
 
-    // အဆုံး – ဘာပတ်မတက်ရင် 404
+    // 2.5) list.php – user list (username + date)
+    if (path === "/kpvip/list.php" && (method === "GET" || method === "POST")) {
+      if (!isAdmin) return needAdmin();
+
+      const result = [];
+      let cursor = undefined;
+
+      // Cloudflare KV list – prefix "user:"
+      do {
+        const list = await env.USERS_KV.list({
+          prefix: "user:",
+          cursor
+        });
+        cursor = list.cursor;
+        for (const k of list.keys) {
+          const username = k.name.replace(/^user:/, "");
+          const user = await env.USERS_KV.get(k.name, "json");
+          if (!user) continue;
+          result.push({
+            username,
+            expireAt: user.expireAt || null,
+            createdAt: user.createdAt || null
+          });
+        }
+      } while (cursor);
+
+      return json({
+        status: "ok",
+        users: result
+      });
+    }
+
+    // default
     return json(
       { status: "error", message: "Not found", path, method },
       404
