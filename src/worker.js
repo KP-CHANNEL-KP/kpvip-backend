@@ -1,186 +1,136 @@
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const path = url.pathname;
+// ========= KP VIP Worker (Easy Mode Admin Auth) =========
 
-    // Base route prefix
-    const base = "/kpvip";
-    if (!path.startsWith(base)) {
-      return json({ status: "error", message: "Not found", path, method: request.method }, 404);
-    }
-
-    const subPath = path.slice(base.length);
-
-    if (request.method === "OPTIONS") {
-      return cors(new Response(null, { status: 200 }));
-    }
-
-    try {
-      // Admin-only actions
-      if (subPath === "/create.php" && request.method === "POST") {
-        await requireAdmin(request, env);
-        return await handleCreate(request, env);
-      }
-
-      if (subPath === "/edit.php" && request.method === "POST") {
-        await requireAdmin(request, env);
-        return await handleEdit(request, env);
-      }
-
-      if (subPath === "/delete.php" && request.method === "POST") {
-        await requireAdmin(request, env);
-        return await handleDelete(request, env);
-      }
-
-      if (subPath === "/list.php" && request.method === "POST") {
-        await requireAdmin(request, env);
-        return await handleList(env);
-      }
-
-      // App Login
-      if (subPath === "/login.php" && request.method === "POST") {
-        return await handleLogin(request, env);
-      }
-
-      // App check user exist
-      if (subPath === "/user_exist.php" && request.method === "POST") {
-        return await handleUserExist(request, env);
-      }
-
-      return json({ status: "error", message: "Not found", subPath }, 404);
-    } catch (e) {
-      return json({ status: "error", message: e.message || "Internal Error" }, 500);
-    }
-  }
-};
-
-
-// ----------------- ADMIN CHECK -----------------
-async function requireAdmin(request, env) {
-  const admin = request.headers.get("x-admin-secret") || "";
-  if (!admin || admin !== env.ADMIN_SECRET) {
-    throw new Error("Unauthorized");
-  }
+// user list
+async function listUsers(env) {
+let txt = await env.USERS_KV.get("users");
+return txt ? JSON.parse(txt) : [];
 }
 
-
-// ----------------- DATA STORAGE -----------------
-async function getUser(env, username) {
-  const raw = await env.USERS_KV.get(username);
-  return raw ? JSON.parse(raw) : null;
+// save list
+async function saveUsers(env, list) {
+await env.USERS_KV.put("users", JSON.stringify(list));
 }
 
-async function saveUser(env, username, data) {
-  return await env.USERS_KV.put(username, JSON.stringify(data));
-}
-
-async function deleteUser(env, username) {
-  return await env.USERS_KV.delete(username);
-}
-
-
-// ----------------- ENDPOINT HANDLERS -----------------
-async function handleCreate(request, env) {
-  const form = await request.formData();
-  const user = (form.get("username") || "").trim();
-  const pass = (form.get("password") || "").trim();
-  const days = Number(form.get("days") || 0);
-  if (!user || !pass || !days) return json({ status: "fail", message: "missing" });
-
-  const expire = Math.floor(Date.now() / 1000) + (days * 86400);
-
-  await saveUser(env, user, {
-    username: user,
-    password: pass,
-    expireAt: expire
-  });
-
-  return json({ status: "success", username: user, expireAt: expire });
-}
-
-async function handleEdit(request, env) {
-  const form = await request.formData();
-  const user = form.get("username");
-  const days = Number(form.get("days") || 0);
-  if (!user || !days) return json({ status: "fail" });
-
-  const exist = await getUser(env, user);
-  if (!exist) return json({ status: "fail", message: "user_not_found" });
-
-  exist.expireAt = (exist.expireAt || Math.floor(Date.now() / 1000)) + (days * 86400);
-  await saveUser(env, user, exist);
-
-  return json({ status: "success", username: user, expireAt: exist.expireAt });
-}
-
-async function handleDelete(request, env) {
-  const form = await request.formData();
-  const user = form.get("username");
-  if (!user) return json({ status: "fail" });
-
-  await deleteUser(env, user);
-  return json({ status: "success", username: user });
-}
-
-async function handleList(env) {
-  const list = [];
-  const data = await env.USERS_KV.list();
-  for (const i of data.keys) {
-    const u = await getUser(env, i.name);
-    if (u) list.push(u);
-  }
-  return json({ status: "success", users: list });
-}
-
-
-// ----------------- APP LOGIN FORMAT -----------------
-async function handleLogin(request, env) {
-  const form = await request.formData();
-  const user = form.get("username");
-  const pass = form.get("password");
-  if (!user || !pass) return json({ status: "fail" });
-
-  const data = await getUser(env, user);
-  if (!data) return json({ status: "fail", message: "user_not_found" });
-
-  if (pass !== data.password) return json({ status: "fail", message: "wrong_password" });
-
-  return json({
-    status: "success",
-    username: user,
-    expireAt: data.expireAt || null
-  });
-}
-
-
-// ----------------- APP EXIST CHECK -----------------
-async function handleUserExist(request, env) {
-  const form = await request.formData();
-  const user = form.get("username");
-  if (!user) return json({ status: "fail" });
-
-  const data = await getUser(env, user);
-  if (!data) return json({ status: "fail" });
-
-  return json({
-    status: "success",
-    username: user,
-    expireAt: data.expireAt || null
-  });
-}
-
-
-// ----------------- UTIL RESPONSE -----------------
+// use raw response
 function json(obj, status = 200) {
-  return cors(new Response(JSON.stringify(obj), {
-    status,
-    headers: { "Content-Type": "application/json" }
-  }));
+return new Response(JSON.stringify(obj), {
+status,
+headers: { "Content-Type": "application/json" }
+});
 }
 
-function cors(res) {
-  res.headers.set("Access-Control-Allow-Origin", "*");
-  res.headers.set("Access-Control-Allow-Headers", "*");
-  res.headers.set("Access-Control-Allow-Methods", "*");
-  return res;
+// ===== adminOnly (Auth disabled for now) =====
+async function adminOnly(request, env, handler) {
+return handler(request, env);
 }
+
+// ===== create user =====
+async function handleCreateUser(req, env) {
+let body = await req.formData();
+let username = body.get("username");
+let password = body.get("password");
+let days = parseInt(body.get("days"));
+
+if (!username || !password || !days)
+return json({ status:"error", message:"invalid params" },400);
+
+let users = await listUsers(env);
+if (users.find(u => u.username === username))
+return json({ status:"error", message:"User exists" },409);
+
+const now = Math.floor(Date.now()/1000);
+const expireAt = now + days*86400;
+
+users.push({ username, password, createdAt: now, expireAt });
+await saveUsers(env,users);
+
+return json({status:"ok", username, expireAt});
+}
+
+// ===== renew/edit =====
+async function handleEditUser(req, env) {
+let body = await req.formData();
+let username = body.get("username");
+let days = parseInt(body.get("days"));
+
+if (!username || !days)
+return json({ status:"error", message:"invalid" },400);
+
+let users = await listUsers(env);
+let u = users.find(x => x.username===username);
+if (!u) return json({status:"error", message:"no user"},404);
+
+u.expireAt += days*86400;
+await saveUsers(env,users);
+return json({status:"ok"});
+}
+
+// ===== delete =====
+async function handleDeleteUser(req,env) {
+let body = await req.formData();
+let username = body.get("username");
+if (!username) return json({status:"error"},400);
+
+let users = await listUsers(env);
+let before = users.length;
+users = users.filter(u=>u.username!==username);
+await saveUsers(env,users);
+
+return json({status:"ok", deleted: before-users.length});
+}
+
+// ===== login for APP =====
+async function handleLogin(req,env){
+let body = await req.formData();
+let username = body.get("username");
+let password = body.get("password");
+
+if(!username||!password)
+return json({status:false,msg:"Invalid"},400);
+
+let users = await listUsers(env);
+let u = users.find(x=>x.username===username && x.password===password);
+if(!u) return json({status:false,msg:"Wrong acc"},403);
+
+let now = Math.floor(Date.now()/1000);
+if(now > u.expireAt)
+return json({status:false,msg:"Expired"},403);
+
+return json({status:true,username,exp:u.expireAt});
+}
+
+// ===== exist for APP =====
+async function handleExist(req,env){
+let body = await req.formData();
+let username = body.get("username");
+
+let users = await listUsers(env);
+let u = users.find(x=>x.username===username);
+
+return json({status:u?true:false});
+}
+
+// ===== list for admin =====
+async function handleList(req,env){
+let users = await listUsers(env);
+return json({status:"ok", users});
+}
+
+// ===== Router =====
+export default {
+async fetch(req, env) {
+let url = new URL(req.url);
+let path = url.pathname;
+
+if (path.endsWith("create.php")) return adminOnly(req,env,handleCreateUser);  
+if (path.endsWith("edit.php")) return adminOnly(req,env,handleEditUser);  
+if (path.endsWith("delete.php")) return handleDeleteUser(req,env);  
+if (path.endsWith("list.php")) return adminOnly(req,env,handleList);  
+
+if (path.endsWith("login.php")) return handleLogin(req,env);  
+if (path.endsWith("user_exist.php")) return handleExist(req,env);  
+
+return json({status:"error",message:"Not found", path,method:req.method},404);
+
+}
+};
