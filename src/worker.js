@@ -61,7 +61,13 @@ export default {
 
       if (!username || !password) {
         return json(
-          { status: "error", message: "Missing username or password" },
+          {
+            status: "error",
+            success: false,
+            error: true,
+            message: "Missing username or password",
+            msg: "Missing username or password"
+          },
           400
         );
       }
@@ -71,14 +77,26 @@ export default {
 
       if (!user) {
         return json(
-          { status: "error", message: "User not found or expired" },
+          {
+            status: "error",
+            success: false,
+            error: true,
+            message: "User not found or expired",
+            msg: "User not found or expired"
+          },
           404
         );
       }
 
       if (user.password !== password) {
         return json(
-          { status: "error", message: "Wrong username or password" },
+          {
+            status: "error",
+            success: false,
+            error: true,
+            message: "Wrong username or password",
+            msg: "Wrong username or password"
+          },
           401
         );
       }
@@ -86,14 +104,24 @@ export default {
       const now = nowSec();
       if (user.expireAt && user.expireAt <= now) {
         return json(
-          { status: "error", message: "Account expired" },
+          {
+            status: "error",
+            success: false,
+            error: true,
+            message: "Account expired",
+            msg: "Account expired"
+          },
           403
         );
       }
 
-      // 🔥 ဒီမှာ status ကို "success" လို့ပြောင်းထားတယ်
+      // 🔥 Login success – field မျိုးစုံနဲ့ပို့မယ်
       return json({
-        status: "success",
+        status: "success",     // string
+        success: true,         // boolean
+        error: false,          // boolean
+        message: "success",
+        msg: "success",
         username,
         expireAt: user.expireAt
       });
