@@ -48,23 +48,24 @@ export default {
 
     // =========================
     // 1) VPN LOGIN (APK)
-    //    POST /kpvip/signin.php
     //    POST /kpvip/login.php
+    //    POST /kpvip/signin.php   (၂ခုလုံး support)
     // =========================
     if (
-      (path === "/kpvip/signin.php" || path === "/kpvip/login.php") &&
+      (path === "/kpvip/login.php" || path === "/kpvip/signin.php") &&
       method === "POST"
     ) {
       const body = await getBody(request);
       const username = body.username || body.user || "";
       const password = body.password || body.pass || "";
 
-      // error response helper (HTTP 200, status="0")
+      // error response helper
       function loginError(msg) {
         return json({
-          status: "0",
+          // App က fail ဖြစ်ရင် ဒီ status ကို toast ပြမယ်
+          status: "fail",
           success: "0",
-          error: true,
+          login: "0",
           message: msg,
           msg: msg
         });
@@ -90,15 +91,16 @@ export default {
         return loginError("Account expired");
       }
 
-      // 🔥 Login success – status "1"
+      // 🔥 Login success – app ဘက် condition မည်သည့် field ကိုမစစ်စေ
+      // အရင် PHP panel format တွေ နီးစပ်အောင် ထုတ်ပေးမယ်
       return json({
-        status: "1",
-        success: "1",
-        error: false,
+        status: "success",   // string
+        success: "1",        // "1" = ok
+        login: "1",          // backup field
         message: "success",
         msg: "success",
         username,
-        expireAt: user.expireAt
+        expire: user.expireAt
       });
     }
 
@@ -239,7 +241,7 @@ export default {
       });
     }
 
-    // list.php – user list
+    // list.php – user list (admin)
     if (path === "/kpvip/list.php" && (method === "GET" || method === "POST")) {
       if (!isAdmin) return needAdmin();
 
