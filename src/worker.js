@@ -1,335 +1,318 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const path = url.pathname;
+    let path = url.pathname;
 
-    // --- Admin panel static files ---
-    if (path === "/admin/" || path === "/admin/index.html") {
-      return serveAdminHtml(env);
-    }
-
-    // --- KP VIP API (apk + admin panel) ---
-    if (path === "/kpvip/login.php" && request.method === "POST") {
-      return handleLogin(request, env);
-    }
-    if (path === "/kpvip/user_exist.php" && request.method === "POST") {
-      return handleUserExist(request, env);
-    }
-    if (path === "/kpvip/edit.php" && request.method === "POST") {
-      return handleEdit(request, env);
-    }
-    if (path === "/kpvip/delete.php" && request.method === "POST") {
-      return handleDelete(request, env);
-    }
-    if (path === "/kpvip/create.php" && request.method === "POST") {
-      return handleCreate(request, env);
-    }
-    if (path === "/kpvip/renew.php" && request.method === "POST") {
-      return handleRenew(request, env);
-    }
-    if (path === "/kpvip/list.php" && request.method === "GET") {
-      return handleList(env);
+    // Route ကို vpnadmin.kpwork.qzz.io/kpvip/* လို့ချိတ်ထားလို့
+    // /kpvip prefix ကိုဖြတ်လိုက်မယ်
+    if (path.startsWith('/kpvip')) {
+      path = path.substring('/kpvip'.length) || '/';
     }
 
-    return jsonResponse(
-      { status: "error", message: "Not found", path, method: request.method },
-      404
-    );
+    // CORS preflight
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: corsHeaders(),
+      });
+    }
+
+    try {
+      if (path === '/create.php' && request.method === 'POST') {
+        return await handleCreateUser(request, env);
+      }
+      if (path === '/renew.php' && request.method === 'POST') {
+        return await handleRenewUser(request, env);
+      }
+      if (path === '/delete.php' && request.method === 'POST') {
+        return await handleDeleteUser(request, env);
+      }
+      if (path === '/list.php' && request.method === 'POST') {
+        return await handleListUsers(request, env);
+      }
+      if (path === '/user_exist.php' && request.method === 'POST') {
+        return await handleUserExist(request, env);
+      }
+      if (path === '/login.php' && request.method === 'POST') {
+        return await handleLogin(request, env);
+      }
+      // APK မှာ reuploadUrl = edit.php ဖြစ်လို့ ဒီမှာ ချိတ်ပေးထားတယ်
+      if (path === '/edit.php' && request.method === 'POST') {
+        return await handleReupload(request, env);
+      }
+
+      // မကိုက်တဲ့ path တွေအတွက်
+      return json(
+        {
+          status: 'error',
+          message: 'Not found',
+          path,
+          method: request.method,
+        },
+        404,
+      );
+    } catch (e) {
+      return json(
+        {
+          status: 'error',
+          message: e?.message || 'Server error',
+        },
+        500,
+      );
+    }
   },
 };
 
-/* ---------------------- helpers ---------------------- */
+/* ---------- Helper Functions ---------- */
 
-function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data), {
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+  };
+}
+
+function json(body, status = 200) {
+  return new Response(JSON.stringify(body), {
     status,
     headers: {
-      "content-type": "application/json; charset=utf-8",
+      'content-type': 'application/json; charset=utf-8',
+      ...corsHeaders(),
     },
   });
 }
 
-async function getFormData(request) {
-  const ct = request.headers.get("content-type") || "";
-  if (ct.includes("application/json")) {
-    const body = await request.json();
-    return new Map(Object.entries(body));
-  } else {
-    const form = await request.formData();
-    const map = new Map();
-    for (const [k, v] of form.entries()) {
-      map.set(k, String(v));
-    }
-    return map;
-  }
-}
-
+// Admin panel auth (Admin Secret)
 function requireAdmin(request, env) {
-  const auth = request.headers.get("Authorization") || "";
-  const ok = auth === env.ADMIN_SECRET || auth === `Bearer ${env.ADMIN_SECRET}`;
-  if (!ok) {
-    return jsonResponse({ status: "error", message: "Unauthorized" }, 401);
-  }
-  return null;
+  const secret = env.ADMIN_SECRET;
+  if (!secret) return false;
+
+  const auth = request.headers.get('Authorization') || '';
+
+  if (auth === secret) return true;
+  if (auth === `Bearer ${secret}`) return true;
+
+  return false;
 }
 
-/* ---------------------- LOGIN (APK) ---------------------- */
-// POST /kpvip/login.php
-// body: username, password
-// success response MUST BE:
-// { "status":"login", "user":"name", "expired_date":"30" }
-
-async function handleLogin(request, env) {
-  const form = await getFormData(request);
-  const username = (form.get("username") || "").trim();
-  const password = (form.get("password") || "").trim();
-
-  if (!username || !password) {
-    // APK မှာ "Login failed: <text>" လို့ပြမယ်
-    return jsonResponse({ status: "missing_fields", message: "username/password required" });
-  }
-
-  const key = `user:${username.toLowerCase()}`;
-  const user = await env.USERS_KV.get(key, { type: "json" });
-
-  if (!user) {
-    return jsonResponse({ status: "user_not_found", message: "User not found" });
-  }
-
-  if (user.password !== password) {
-    return jsonResponse({ status: "invalid_password", message: "Wrong password" });
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-
-  if (user.expireAt && now >= user.expireAt) {
-    return jsonResponse({ status: "expired", message: "User expired" });
-  }
-
-  // days left -> expired_date (string, apk uses as Calendar.add(DAY, days))
-  let daysLeft = 30;
-  if (user.expireAt) {
-    const secondsLeft = Math.max(0, user.expireAt - now);
-    daysLeft = Math.max(1, Math.ceil(secondsLeft / 86400));
-  }
-
-  // အဓိကအချက်: status = "login"
-  return jsonResponse({
-    status: "login",
-    user: username,
-    expired_date: String(daysLeft),
-  });
+// KV key
+function userKey(username) {
+  return `user:${username.toLowerCase()}`;
 }
 
-/* ---------------------- CHECK USER (APK) ---------------------- */
-// POST /kpvip/user_exist.php
-// body: username
-// handleCheckUserResponse() က status == "success" ဆိုရင် OK
+/* ---------- Handlers ---------- */
 
-async function handleUserExist(request, env) {
-  const form = await getFormData(request);
-  const username = (form.get("username") || "").trim();
-
-  if (!username) {
-    return jsonResponse({ status: "error", message: "username required" });
+// POST /create.php (Admin)
+async function handleCreateUser(request, env) {
+  if (!requireAdmin(request, env)) {
+    return json({ status: 'error', message: 'Unauthorized' }, 401);
   }
 
-  const key = `user:${username.toLowerCase()}`;
-  const user = await env.USERS_KV.get(key, { type: "json" });
+  const data = await request.json().catch(() => ({}));
+  const username = (data.username || '').trim();
+  const password = (data.password || '').trim();
+  const days = parseInt(data.days || data.expireDays || 0, 10);
 
-  if (!user) {
-    return jsonResponse({ status: "not_found", message: "User not found" });
+  if (!username || !password || !days || days <= 0) {
+    return json({ status: 'error', message: 'Invalid input' }, 400);
   }
 
-  const now = Math.floor(Date.now() / 1000);
-  if (user.expireAt && now >= user.expireAt) {
-    // APK က status != "success" ဆိုရင် auto delete လုပ်မယ်
-    return jsonResponse({ status: "expired", message: "User expired" });
-  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expireAt = nowSec + days * 24 * 60 * 60;
 
-  return jsonResponse({ status: "success", message: "User active" });
-}
-
-/* ---------------------- EDIT (APK reuploadUserInfo) ---------------------- */
-// POST /kpvip/edit.php
-// body: username, device_id, expired_date (ms since epoch as string)
-
-async function handleEdit(request, env) {
-  const form = await getFormData(request);
-  const username = (form.get("username") || "").trim();
-  const deviceId = (form.get("device_id") || "").trim();
-  const expiredMs = form.get("expired_date");
-
-  if (!username || !deviceId || !expiredMs) {
-    return jsonResponse({ status: "error", message: "missing fields" }, 400);
-  }
-
-  const key = `user:${username.toLowerCase()}`;
-  const user = (await env.USERS_KV.get(key, { type: "json" })) || {};
-
-  let expireAt = user.expireAt;
-  const ms = Number(expiredMs);
-  if (!Number.isNaN(ms) && ms > 0) {
-    expireAt = Math.floor(ms / 1000);
-  }
-
-  const updated = {
-    ...user,
-    username,
-    deviceId,
-    expireAt,
-  };
-
-  await env.USERS_KV.put(key, JSON.stringify(updated));
-
-  return jsonResponse({ status: "ok", message: "updated" });
-}
-
-/* ---------------------- DELETE (APK + auto delete) ---------------------- */
-// POST /kpvip/delete.php
-// body: usernameToDelete
-// header: Authorization: N4VPN-MinKhant (APK) or ADMIN_SECRET (panel)
-
-async function handleDelete(request, env) {
-  const form = await getFormData(request);
-  const username = (form.get("usernameToDelete") || "").trim();
-
-  if (!username) {
-    return jsonResponse({ status: "error", message: "usernameToDelete required" }, 400);
-  }
-
-  // apk မှာ header = "N4VPN-MinKhant" သုံးထားပြိမယ်, admin panel ကတော့ ADMIN_SECRET သုံးမယ်
-  const auth = request.headers.get("Authorization") || "";
-  if (
-    auth !== "N4VPN-MinKhant" &&
-    auth !== env.ADMIN_SECRET &&
-    auth !== `Bearer ${env.ADMIN_SECRET}`
-  ) {
-    return jsonResponse({ status: "error", message: "Unauthorized" }, 401);
-  }
-
-  const key = `user:${username.toLowerCase()}`;
-  await env.USERS_KV.delete(key);
-
-  return jsonResponse({ status: "ok", message: "user deleted", user: username });
-}
-
-/* ---------------------- ADMIN PANEL APIs ---------------------- */
-
-// POST /kpvip/create.php   (admin panel create user)
-async function handleCreate(request, env) {
-  const unauthorized = requireAdmin(request, env);
-  if (unauthorized) return unauthorized;
-
-  const form = await getFormData(request);
-  const username = (form.get("username") || "").trim();
-  const password = (form.get("password") || "").trim();
-  const daysStr = form.get("days") || form.get("expire_days") || "30";
-
-  if (!username || !password) {
-    return jsonResponse({ status: "error", message: "username/password required" }, 400);
-  }
-
-  const days = Number(daysStr) || 30;
-  const now = Math.floor(Date.now() / 1000);
-  const expireAt = now + days * 86400;
-
-  const key = `user:${username.toLowerCase()}`;
   const user = {
     username,
     password,
-    createdAt: now,
-    expireAt,
+    expireAt,      // seconds
+    createdAt: nowSec,
+    deviceId: null,
   };
 
-  await env.USERS_KV.put(key, JSON.stringify(user));
+  await env.USERS_KV.put(userKey(username), JSON.stringify(user));
 
-  return jsonResponse({
-    status: "ok",
-    message: "User created",
+  return json({
+    status: 'ok',
+    message: 'User created',
     username,
     expireAt,
   });
 }
 
-// POST /kpvip/renew.php  (admin panel renew)
-async function handleRenew(request, env) {
-  const unauthorized = requireAdmin(request, env);
-  if (unauthorized) return unauthorized;
-
-  const form = await getFormData(request);
-  const username = (form.get("username") || "").trim();
-  const extraDays = Number(form.get("extra_days") || form.get("days") || "0") || 0;
-
-  if (!username || !extraDays) {
-    return jsonResponse(
-      { status: "error", message: "username and extra days required" },
-      400
-    );
+// POST /renew.php (Admin)
+async function handleRenewUser(request, env) {
+  if (!requireAdmin(request, env)) {
+    return json({ status: 'error', message: 'Unauthorized' }, 401);
   }
 
-  const key = `user:${username.toLowerCase()}`;
-  const user = await env.USERS_KV.get(key, { type: "json" });
-  if (!user) {
-    return jsonResponse({ status: "error", message: "User not found" }, 404);
+  const data = await request.json().catch(() => ({}));
+  const username = (data.username || '').trim();
+  const extraDays = parseInt(data.extraDays || data.days || 0, 10);
+
+  if (!username || !extraDays || extraDays <= 0) {
+    return json({ status: 'error', message: 'Invalid input' }, 400);
   }
 
-  const now = Math.floor(Date.now() / 1000);
-  const base = user.expireAt && user.expireAt > now ? user.expireAt : now;
-  user.expireAt = base + extraDays * 86400;
+  const key = userKey(username);
+  const stored = await env.USERS_KV.get(key);
+  if (!stored) {
+    return json({ status: 'error', message: 'User not found' }, 404);
+  }
+
+  const user = JSON.parse(stored);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const base = user.expireAt && user.expireAt > nowSec ? user.expireAt : nowSec;
+  user.expireAt = base + extraDays * 24 * 60 * 60;
 
   await env.USERS_KV.put(key, JSON.stringify(user));
 
-  return jsonResponse({
-    status: "ok",
-    message: "User renewed",
+  return json({
+    status: 'ok',
+    message: 'User renewed',
     username,
     expireAt: user.expireAt,
   });
 }
 
-// GET /kpvip/list.php   (admin panel User List)
-async function handleList(env) {
-  const list = await env.USERS_KV.list({ prefix: "user:" });
-  const now = Math.floor(Date.now() / 1000);
+// POST /delete.php (Admin + App)
+async function handleDeleteUser(request, env) {
+  const auth = request.headers.get('Authorization') || '';
+  const APP_KEY = 'N4VPN-MinKhant';
 
+  if (!requireAdmin(request, env) && auth !== APP_KEY) {
+    return json({ status: 'error', message: 'Unauthorized' }, 401);
+  }
+
+  const data = await request.json().catch(() => ({}));
+  const username = (data.usernameToDelete || data.username || '').trim();
+
+  if (!username) {
+    return json({ status: 'error', message: 'Username required' }, 400);
+  }
+
+  await env.USERS_KV.delete(userKey(username));
+
+  return json({
+    status: 'ok',
+    message: 'User deleted',
+    username,
+  });
+}
+
+// POST /list.php (Admin)
+async function handleListUsers(request, env) {
+  if (!requireAdmin(request, env)) {
+    return json({ status: 'error', message: 'Unauthorized' }, 401);
+  }
+
+  const list = await env.USERS_KV.list({ prefix: 'user:' });
   const users = [];
+
   for (const key of list.keys) {
-    const data = await env.USERS_KV.get(key.name, { type: "json" });
-    if (!data) continue;
-    users.push({
-      username: data.username,
-      expireAt: data.expireAt || null,
-      createdAt: data.createdAt || null,
-      expired: data.expireAt ? now >= data.expireAt : false,
+    const value = await env.USERS_KV.get(key.name);
+    if (!value) continue;
+    try {
+      const u = JSON.parse(value);
+      users.push({
+        username: u.username,
+        expireAt: u.expireAt,
+        createdAt: u.createdAt,
+      });
+    } catch {
+      // ignore broken record
+    }
+  }
+
+  return json({ status: 'ok', users });
+}
+
+// POST /user_exist.php (App)
+async function handleUserExist(request, env) {
+  const data = await request.json().catch(() => ({}));
+  const username = (data.username || '').trim();
+  if (!username) {
+    return json({ status: 'error', message: 'no_username' }, 400);
+  }
+
+  const stored = await env.USERS_KV.get(userKey(username));
+  if (stored) {
+    return json({ status: 'success' });
+  } else {
+    return json({ status: 'error', message: 'user_not_found' });
+  }
+}
+
+// POST /login.php (App)
+async function handleLogin(request, env) {
+  const data = await request.json().catch(() => ({}));
+  const username = (data.username || '').trim();
+  const password = (data.password || '').trim();
+
+  if (!username || !password) {
+    return json({ status: 'error', message: 'missing_credentials' }, 400);
+  }
+
+  const stored = await env.USERS_KV.get(userKey(username));
+  if (!stored) {
+    return json({ status: 'error', message: 'user_not_found' });
+  }
+
+  const user = JSON.parse(stored);
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  if (user.password !== password) {
+    return json({ status: 'error', message: 'invalid_password' });
+  }
+
+  if (!user.expireAt || user.expireAt < nowSec) {
+    return json({ status: 'error', message: 'expired' });
+  }
+
+  // deviceId မရှိသေး → first login
+  if (!user.deviceId) {
+    const secondsLeft = user.expireAt - nowSec;
+    const daysLeft = Math.max(1, Math.ceil(secondsLeft / (24 * 60 * 60)));
+
+    return json({
+      status: 'login',
+      user: user.username,
+      expired_date: String(daysLeft), // app က days လိုလားတယ်
     });
   }
 
-  return jsonResponse({ status: "ok", users });
+  // deviceId ရှိပြီးသား → re_login
+  const expireMillis = user.expireAt * 1000;
+
+  return json({
+    status: 're_login',
+    user: user.username,
+    expired_date: String(expireMillis), // millis
+    device_id: user.deviceId,
+  });
 }
 
-/* ---------------------- Admin HTML (simple) ---------------------- */
+// POST /edit.php (App reuploadUserInfo)
+async function handleReupload(request, env) {
+  const data = await request.json().catch(() => ({}));
+  const username = (data.username || '').trim();
+  const deviceId = (data.device_id || '').trim();
+  const expiredDateStr = (data.expired_date || '').trim();
 
-function serveAdminHtml(env) {
-  // ဒီမှာ မင်းသုံးနေတဲ့ admin panel HTML ကို ထည့်ထားရင်ရမယ်
-  const html = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>KP VIP Admin Panel</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem; background:#fafafa; }
-    h1 { text-align:center; }
-  </style>
-</head>
-<body>
-  <h1>KP VIP Admin Panel</h1>
-  <p>Admin UI static file here… (already working from your index.html)</p>
-</body>
-</html>`;
-  return new Response(html, {
-    status: 200,
-    headers: { "content-type": "text/html; charset=utf-8" },
-  });
+  if (!username || !deviceId || !expiredDateStr) {
+    return json({ status: 'error', message: 'Invalid input' }, 400);
+  }
+
+  const stored = await env.USERS_KV.get(userKey(username));
+  if (!stored) {
+    return json({ status: 'error', message: 'user_not_found' }, 404);
+  }
+
+  const user = JSON.parse(stored);
+  const expireMillis = parseInt(expiredDateStr, 10) || Date.now();
+  user.deviceId = deviceId;
+  user.expireAt = Math.floor(expireMillis / 1000);
+
+  await env.USERS_KV.put(userKey(username), JSON.stringify(user));
+
+  return json({ status: 'ok', message: 'updated' });
 }
