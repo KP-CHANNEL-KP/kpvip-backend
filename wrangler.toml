@@ -1,4 +1,4 @@
-name = "kpvip-api"
+name = "vpnadmin"
 main = "src/worker.js"
 compatibility_date = "2025-11-30"
 
