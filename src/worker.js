@@ -125,18 +125,11 @@ async function deleteUser(env, username) {
 /* ----------------- Admin auth ----------------- */
 
 // Admin panel 用 route တွေ (create / edit / list) အတွက်
-async function adminOnly(request, env, handler) {
-  const sent = request.headers.get("x-admin-secret") || "";
-  const expected = env.ADMIN_SECRET || "";
-
-  if (!sent || !expected || sent !== expected) {
-    // Response ကို throw လိုက်မယ် – மேலခု catch ကြောင့် တိုက်ရိုက် client ကို ပြန်ပါတယ်
-    throw json({ status: "error", message: "Unauthorized" }, 401);
-  }
-
-  return handler(request, env);
+// delete.php (Admin + App နှစ်ဘက်စလုံးသုံးမယ့် route)
+async function handleDeleteRoute(request, env) {
+  // App နဲ့ Admin ကို မခွဲတော့ဘူး
+  return handleDeleteUser(request, env);
 }
-
 // delete.php လို app က Authorization header သုံးပြီးခေါ်နိုင်သလို
 // admin panel က x-admin-secret နဲ့လဲ ခေါ်တဲ့အခါ အိုကေ ဖြစ်အောင်
 async function handleDeleteRoute(request, env) {
