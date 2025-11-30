@@ -49,7 +49,7 @@ export default {
     // =========================
     // 1) VPN LOGIN (APK)
     //    POST /kpvip/login.php
-    //    POST /kpvip/signin.php   (၂ခုလုံး support)
+    //    POST /kpvip/signin.php
     // =========================
     if (
       (path === "/kpvip/login.php" || path === "/kpvip/signin.php") &&
@@ -59,12 +59,11 @@ export default {
       const username = body.username || body.user || "";
       const password = body.password || body.pass || "";
 
-      // error response helper
+      // error response helper (HTTP 200)
       function loginError(msg) {
         return json({
-          // App က fail ဖြစ်ရင် ဒီ status ကို toast ပြမယ်
-          status: "fail",
-          success: "0",
+          success: "false",
+          status: "false",
           login: "0",
           message: msg,
           msg: msg
@@ -91,14 +90,13 @@ export default {
         return loginError("Account expired");
       }
 
-      // 🔥 Login success – app ဘက် condition မည်သည့် field ကိုမစစ်စေ
-      // အရင် PHP panel format တွေ နီးစပ်အောင် ထုတ်ပေးမယ်
+      // 🔥 Login success – APK format
       return json({
-        status: "success",   // string
-        success: "1",        // "1" = ok
-        login: "1",          // backup field
-        message: "success",
-        msg: "success",
+        success: "true",
+        status: "true",
+        login: "1",
+        message: "Login Success",
+        msg: "Login Success",
         username,
         expire: user.expireAt
       });
