@@ -33,11 +33,15 @@ export default {
 
     const ADMIN_SECRET = env.ADMIN_SECRET || "change_me";
 
-    // -------------------------
-    // 1) VPN login (APK ကသုံးမယ့် ပိုင်း)
-    // POST /kpvip/login.php
-    // -------------------------
-    if (path === "/kpvip/login.php" && method === "POST") {
+    // =========================
+    // 1) VPN LOGIN
+    //    POST /kpvip/signin.php   (အခု APK က သုံးနေတယ်)
+    //    POST /kpvip/login.php    (ဟောင်း version ပါမယ်)
+    // =========================
+    if (
+      (path === "/kpvip/signin.php" || path === "/kpvip/login.php") &&
+      method === "POST"
+    ) {
       const body = await getBody(request);
       const username = body.username || body.user || "";
       const password = body.password || body.pass || "";
@@ -53,12 +57,15 @@ export default {
       const user = await env.USERS_KV.get(key, "json");
 
       if (!user) {
+        // KV ထဲမှာ key မရှိ = မဖွင့်ရသေး / TTL လွန် / ဖျက်ထားပြီ
         return json(
           { status: "error", message: "User not found or expired" },
           404
         );
       }
 
+      // demo only – password ကို plain text နဲ့တူမလား စစ်
+      // အမှန် production မှာ hash သုံးသင့်
       if (user.password !== password) {
         return json(
           { status: "error", message: "Wrong username or password" },
@@ -84,13 +91,18 @@ export default {
       });
     }
 
-    // ===== Admin only routes =====
+    // =========================
+    // Admin only routes
+    // =========================
     const adminHeader = request.headers.get("x-admin-secret");
     const isAdmin = adminHeader && adminHeader === ADMIN_SECRET;
 
-    // user_exist.php – user ရှိ/မရှိ စစ်
+    // 2) user_exist.php – user ရှိ/မရှိ check
+    // POST /kpvip/user_exist.php
     if (path === "/kpvip/user_exist.php" && method === "POST") {
-      if (!isAdmin) return json({ status: "error", message: "Unauthorized" }, 401);
+      if (!isAdmin) {
+        return json({ status: "error", message: "Unauthorized" }, 401);
+      }
 
       const body = await getBody(request);
       const username = body.username || body.user || "";
@@ -116,9 +128,12 @@ export default {
       });
     }
 
-    // edit.php – expire date / plan / config ပြင် (renew)
+    // 3) edit.php – expire date / plan / vpnConfig ပြင် (renew)
+    // POST /kpvip/edit.php
     if (path === "/kpvip/edit.php" && method === "POST") {
-      if (!isAdmin) return json({ status: "error", message: "Unauthorized" }, 401);
+      if (!isAdmin) {
+        return json({ status: "error", message: "Unauthorized" }, 401);
+      }
 
       const body = await getBody(request);
       const username = body.username || body.user || "";
@@ -160,9 +175,12 @@ export default {
       });
     }
 
-    // delete.php – user ဖျက်
+    // 4) delete.php – user ဖျက်
+    // POST /kpvip/delete.php
     if (path === "/kpvip/delete.php" && method === "POST") {
-      if (!isAdmin) return json({ status: "error", message: "Unauthorized" }, 401);
+      if (!isAdmin) {
+        return json({ status: "error", message: "Unauthorized" }, 401);
+      }
 
       const body = await getBody(request);
       const username = body.username || body.user || "";
@@ -180,9 +198,12 @@ export default {
       });
     }
 
-    // create.php – user အသစ်ဖန်တီး
+    // 5) create.php – user အသစ် ဖန်တီး
+    // POST /kpvip/create.php
     if (path === "/kpvip/create.php" && method === "POST") {
-      if (!isAdmin) return json({ status: "error", message: "Unauthorized" }, 401);
+      if (!isAdmin) {
+        return json({ status: "error", message: "Unauthorized" }, 401);
+      }
 
       const body = await getBody(request);
       const username = body.username || "";
