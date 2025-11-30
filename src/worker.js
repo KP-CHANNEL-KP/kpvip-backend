@@ -59,67 +59,42 @@ export default {
       const username = body.username || body.user || "";
       const password = body.password || body.pass || "";
 
+      // error response helper (HTTP 200, status="0")
+      function loginError(msg) {
+        return json({
+          status: "0",
+          success: "0",
+          error: true,
+          message: msg,
+          msg: msg
+        });
+      }
+
       if (!username || !password) {
-        return json(
-          {
-            status: "error",
-            success: false,
-            error: true,
-            message: "Missing username or password",
-            msg: "Missing username or password"
-          },
-          400
-        );
+        return loginError("Missing username or password");
       }
 
       const key = `user:${username}`;
       const user = await env.USERS_KV.get(key, "json");
 
       if (!user) {
-        return json(
-          {
-            status: "error",
-            success: false,
-            error: true,
-            message: "User not found or expired",
-            msg: "User not found or expired"
-          },
-          404
-        );
+        return loginError("User not found or expired");
       }
 
       if (user.password !== password) {
-        return json(
-          {
-            status: "error",
-            success: false,
-            error: true,
-            message: "Wrong username or password",
-            msg: "Wrong username or password"
-          },
-          401
-        );
+        return loginError("Wrong username or password");
       }
 
       const now = nowSec();
       if (user.expireAt && user.expireAt <= now) {
-        return json(
-          {
-            status: "error",
-            success: false,
-            error: true,
-            message: "Account expired",
-            msg: "Account expired"
-          },
-          403
-        );
+        return loginError("Account expired");
       }
 
-      // 🔥 Login success – field မျိုးစုံနဲ့ပို့မယ်
+      // 🔥 Login success – status "1"
       return json({
-        status: "success",     // string
-        success: true,         // boolean
-        error: false,          // boolean
+        status: "1",
+        success: "1",
+        error: false,
         message: "success",
         msg: "success",
         username,
