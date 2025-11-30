@@ -62,9 +62,9 @@ export default {
       // error response helper (HTTP 200)
       function loginError(msg) {
         return json({
-          success: "false",
-          status: "false",
-          login: "0",
+          success: false,      // boolean
+          status: false,
+          login: 0,
           message: msg,
           msg: msg
         });
@@ -90,11 +90,11 @@ export default {
         return loginError("Account expired");
       }
 
-      // 🔥 Login success – APK format
+      // 🔥 Login success – boolean format
       return json({
-        success: "true",
-        status: "true",
-        login: "1",
+        success: true,        // boolean
+        status: true,
+        login: 1,
         message: "Login Success",
         msg: "Login Success",
         username,
